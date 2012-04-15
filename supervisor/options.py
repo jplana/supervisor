@@ -16,6 +16,7 @@ import pkg_resources
 import select
 import glob
 import platform
+import traceback
 
 from fcntl import fcntl
 from fcntl import F_SETFL, F_GETFL
@@ -450,6 +451,10 @@ class ServerOptions(Options):
 
         self.server_configs = sconfigs = section.server_configs
 
+        self.broker_configs = bconfigs = section.broker_configs
+
+
+
         # we need to set a fallback serverurl that process.spawn can use
 
         # prefer a unix domain socket
@@ -564,6 +569,8 @@ class ServerOptions(Options):
                 env.update(proc.environment)
                 proc.environment = env
         section.server_configs = self.server_configs_from_parser(parser)
+        
+        section.broker_configs = self.broker_configs_from_parser(parser)
         section.profile_options = None
         return section
 
@@ -914,7 +921,9 @@ class ServerOptions(Options):
             config['family'] = socket.AF_UNIX
             sfile = expand(sfile, {'here':self.here}, 'socket file')
             config['file'] = normalize_path(sfile)
+            
             config.update(self._parse_username_and_password(parser, section))
+            
             chown = get(section, 'chown', None)
             if chown is not None:
                 try:
@@ -937,6 +946,28 @@ class ServerOptions(Options):
             configs.append(config)
 
         return configs
+
+    def broker_configs_from_parser(self, parser):
+        configs = []
+        amqp_defs = self._parse_servernames(parser, 'amqp_connection')
+        for name, section in amqp_defs:
+            config = {}
+            get = parser.saneget
+            config['name'] = name
+            port = get(section, 'port', None)
+            if port is None:
+                raise ValueError('section [%s] has no port value' % section)
+            host, port = inet_address(port)
+            config['host'] = host
+            config['port'] = port
+            config['section'] = section
+            config.update(self._parse_username_and_password(parser, section))
+            configs.append(config)
+            print configs
+        return configs
+
+
+
 
     def daemonize(self):
         # To daemonize, we need to become the leader of our own session
@@ -1074,6 +1105,13 @@ class ServerOptions(Options):
         except ValueError, why:
             self.usage(why[0])
 
+    def connectamqpbroker(self, supervisord):
+        try:
+            self.amqpconnection = self.make_amqp_connection(supervisord)
+        except Exception as e:
+            traceback.print_exc(file=sys.stdout)
+            self.usage(e)
+
     def get_autochildlog_name(self, name, identifier, channel):
         prefix='%s-%s---%s-' % (name, channel, identifier)
         logfile = self.mktempfile(
@@ -1101,6 +1139,7 @@ class ServerOptions(Options):
                     self.logger.warn('Failed to clean up %r' % pathname)
 
     def get_socket_map(self):
+        print asyncore.socket_map
         return asyncore.socket_map
 
     def cleanup_fds(self):
@@ -1268,6 +1307,10 @@ class ServerOptions(Options):
     def make_http_servers(self, supervisord):
         from supervisor.http import make_http_servers
         return make_http_servers(self, supervisord)
+
+    def make_amqp_connection(self, supervisord):
+        from supervisor.amqp import make_amqp_connection
+        return make_amqp_connection(self, supervisord)
 
     def close_fd(self, fd):
         try:
