@@ -21,7 +21,7 @@ from supervisor.medusa import filesys
 from supervisor.medusa import default_handler
 from supervisor.medusa.counter import counter
 from supervisor.medusa import logger
-from pika.adapters import AsyncoreConnection
+from pika.adapters import AsyncoreConnection #, AsyncoreDispatcher
 from pika.connection import ConnectionParameters
 from pika.credentials import PlainCredentials
 
@@ -530,46 +530,17 @@ class supervisor_http_server(http_server.http_server):
 
 
 
-class amqp_server(AsyncoreConnection):
-
-    def __init__(self, params, resolver=None, logger_object=None):
-        AsyncoreConnection.__init__(self,params, on_open_callback=self._on_connect )
 
 
-        self.handlers = []
+class supervisor_amqp_connection(AsyncoreConnection):
 
-        self.total_clients = counter()
-        self.total_requests = counter()
-        self.exceptions = counter()
-        self.bytes_out = counter()
-        self.bytes_in  = counter()
-
-        if not logger_object:
-            logger_object = logger.file_logger (sys.stdout)
-
-        if resolver:
-            self.logger = logger.resolving_logger (resolver, logger_object)
-        else:
-            self.logger = logger.unresolving_logger (logger_object)
-
-        #asyncore.socket_map.update(self.map)
-        #self.ioloop.start()
-        asyncore.socket_map.update(dict({self.socket.fileno(): self}))
-
-    def install_handler (self, handler, back=0):
-        if back:
-            self.handlers.append (handler)
-        else:
-            self.handlers.insert (0, handler)
-
-    def remove_handler (self, handler):
-        self.handlers.remove (handler)
+    def __init__(self, parameters):        
+        AsyncoreConnection.__init__(self, parameters, on_open_callback=self._on_connect)
 
     def _on_connect(self, connection):
         print "_on_connect"
         connection.channel(self._on_channel_open)
        
-
     def _on_channel_open(self, channel):
         self.channel = channel
         print "_on_channel_open"
@@ -582,6 +553,7 @@ class amqp_server(AsyncoreConnection):
         print "_on_queue_declared"
         self.channel.basic_consume(self.handle_delivery, queue='test')
 
+
     def handle_delivery(self, channel, method_frame, header_frame, body):
         print "Basic.Deliver %s delivery-tag %i: %s" %\
           (header_frame.content_type,
@@ -589,47 +561,6 @@ class amqp_server(AsyncoreConnection):
            body)
         self.channel.basic_ack(delivery_tag=method_frame.delivery_tag)
 
-    #def handle_connect(self):
-    #    print "hndle Connect"
-
-    def handle_accept (self):
-        print "Aqui"
-
-        self.total_clients.increment()
-        try:
-            conn, addr = self.accept()
-        except socket.error:
-            # linux: on rare occasions we get a bogus socket back from
-            # accept.  socketmodule.c:makesockaddr complains that the
-            # address family is unknown.  We don't want the whole server
-            # to shut down because of this.
-            self.log_info ('warning: server accept() threw an exception', 'warning')
-            return
-        except TypeError:
-            # unpack non-sequence.  this can happen when a read event
-            # fires on a listening socket, but when we call accept()
-            # we get EWOULDBLOCK, so dispatcher.accept() returns None.
-            # Seen on FreeBSD3.
-            self.log_info ('warning: server accept() threw EWOULDBLOCK', 'warning')
-            return
-
-        self.channel_class (self, conn, addr)
-    def readable (self):
-        return True
-    def handle_error(self):
-        pass
-
-
-
-class supervisor_amqp_connection(amqp_server):
-    """ AF_INET version of supervisor HTTP server """
-
-    def __init__(self, ip, port, user, password, logger_object):
-        self.ip = ip
-        self.port = port
-        user_credentials = PlainCredentials(user, password)
-        connection_params = ConnectionParameters(host=ip, port=5672, credentials=user_credentials)
-        amqp_server.__init__(self, connection_params)
 
 
 class supervisor_af_unix_http_server(supervisor_http_server):
@@ -856,8 +787,11 @@ def make_amqp_connection(options, supervisord):
     for config in options.broker_configs:
         host, port, user, password = config['host'], config['port'], config['username'], config['password']
 
-        hs = supervisor_amqp_connection(host, port, user, password,
-                                             logger_object=wrapper)
+
+        user_credentials = PlainCredentials(user, password)
+        connection_params = ConnectionParameters(host=host, port=port, credentials=user_credentials)
+        ampq_connection = supervisor_amqp_connection(parameters = connection_params)
+        asyncore.socket_map.update({ampq_connection.socket.fileno(): ampq_connection.ioloop})
     
 
         from xmlrpc import supervisor_xmlrpc_handler
@@ -873,6 +807,7 @@ def make_amqp_connection(options, supervisord):
                  raise ValueError('Could not make %s rpc interface' % name)
              subinterfaces.append((name, inst))
              options.logger.info('RPC interface %r initialized' % name)
+
 
         subinterfaces.append(('system',
                                SystemNamespaceRPCInterface(subinterfaces)))
@@ -907,8 +842,8 @@ def make_amqp_connection(options, supervisord):
         # hs.install_handler(uihandler)
         # hs.install_handler(maintailhandler)
         # hs.install_handler(tailhandler)
-        hs.install_handler(xmlrpchandler) # last for speed (first checked)
-        brokers.append((config, hs))
+        #ampq_connection.install_handler(xmlrpchandler) # last for speed (first checked)
+        brokers.append((config, ampq_connection.ioloop))
 
     return brokers
 
