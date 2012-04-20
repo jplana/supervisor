@@ -266,8 +266,10 @@ class http_request:
         if type(thing) == type(''):
             self.outgoing.append(producers.simple_producer(thing,
               buffer_size=len(thing)))
+            print "OUTGOING", self.outgoing
         else:
             self.outgoing.append(thing)
+            print "OUTGOING", self.outgoing
 
     def response (self, code=200):
         message = self.responses[code]
@@ -291,6 +293,7 @@ class http_request:
     reply_now = error
 
     def done (self):
+        print "in done"
         "finalize this transaction - send output to the http channel"
 
         # ----------------------------------------
@@ -579,7 +582,7 @@ class http_channel (asynchat.async_chat):
 
             command, uri, version = crack_request (request)
             header = join_headers (lines[1:])
-
+            print "Aqui", request
             # unquote path if necessary (thanks to Skip Montanaro for pointing
             # out that we must unquote in piecemeal fashion).
             rpath, rquery = splitquery(uri)

@@ -1,4 +1,5 @@
 import os
+import re
 import stat
 import time
 import sys
@@ -25,6 +26,7 @@ from pika.adapters import AsyncoreConnection #, AsyncoreDispatcher
 from pika.connection import ConnectionParameters
 from pika.credentials import PlainCredentials
 
+from urllib import unquote, splitquery
 from supervisor.medusa.auth_handler import auth_handler
 class NOT_DONE_YET:
     pass
@@ -235,6 +237,7 @@ class deferring_http_request(http_server.http_request):
         if globbing:
             outgoing_producer = deferring_globbing_producer(outgoing_producer)
 
+        print "Aqui!!!!"
         self.channel.push_with_producer(outgoing_producer)
 
         self.channel.current_request = None
@@ -529,13 +532,56 @@ class supervisor_http_server(http_server.http_server):
         self.logger.log(ip, message)
 
 
+def join_headers (headers):
+    print "Join_HEaders", headers
+    r = []
+    for i in range(len(headers)):
+        
+        try:
+            if headers[i][0] in ' \t':
+                r[-1] = r[-1] + headers[i][1:]
+            else:
+                r.append (headers[i])
+        except:
+            pass
+    return r
+
+def get_header (head_reg, lines, group=1):
+    for line in lines:
+        m = head_reg.match (line)
+        if m and m.end() == len(line):
+            return m.group (group)
+    return ''
+
+def get_header_match (head_reg, lines):
+    for line in lines:
+        m = head_reg.match (line)
+        if m and m.end() == len(line):
+            return m
+    return ''
 
 
+REQUEST = re.compile ('([^ ]+) ([^ ]+)(( HTTP/([0-9.]+))$|$)')
+
+def crack_request (r):
+    m = REQUEST.match (r)
+    if m and m.end() == len(r):
+        if m.group(3):
+            version = m.group(5)
+        else:
+            version = None
+        return m.group(1), m.group(2), version
+    else:
+        return None, None, None  
 
 class supervisor_amqp_connection(AsyncoreConnection):
 
-    def __init__(self, parameters):        
+    def __init__(self, parameters, logger_object):        
         AsyncoreConnection.__init__(self, parameters, on_open_callback=self._on_connect)
+        self.handlers = []
+        self.server = self
+        self.addr = parameters.host, parameters.port 
+        self.logger = logger.unresolving_logger (logger_object)
 
     def _on_connect(self, connection):
         print "_on_connect"
@@ -555,11 +601,82 @@ class supervisor_amqp_connection(AsyncoreConnection):
 
 
     def handle_delivery(self, channel, method_frame, header_frame, body):
+        print channel, method_frame, header_frame, body
         print "Basic.Deliver %s delivery-tag %i: %s" %\
           (header_frame.content_type,
            method_frame.delivery_tag,
            body)
+
         self.channel.basic_ack(delivery_tag=method_frame.delivery_tag)
+        http_head, http_headers = body.splitlines()[0], body.splitlines()[2:] 
+        print  "* | %s" %  (http_headers)
+        command, uri, version = crack_request(http_head)
+        print command, uri, version
+        if not command:
+            return
+        header = join_headers (http_headers)
+
+        # unquote path if necessary (thanks to Skip Montanaro for pointing
+        # out that we must unquote in piecemeal fashion).
+        rpath, rquery = splitquery(uri)
+        if '%' in rpath:
+            if rquery:
+                uri = unquote (rpath) + '?' + rquery
+            else:
+                uri = unquote (rpath)
+
+
+        # --------------------------------------------------
+        # handler selection and dispatch
+        # --------------------------------------------------
+        r = http_server.http_request (self, body, command, uri, version, header)
+
+        print "Aqui", self.handlers
+        for h in self.handlers:
+            print "handler", h
+            if h.match (r):
+                print "Matched!"
+                try:
+                    self.current_request = r
+#                    import pdb; pdb.set_trace()
+#                    print dir(r)
+                    # This isn't used anywhere.
+                    # r.handler = h # CYCLE
+                    h.handle_request (r)
+                    h.continue_request(body.split('\t')[-1], r)
+                    
+                except:
+                    #self.server.exceptions.increment()
+                    (file, fun, line), t, v, tbinfo = asyncore.compact_traceback()
+                    print (file, fun, line), t, v, tbinfo
+                    try:
+                        r.error (500)
+                    except:
+                        pass
+                return
+
+    def push_with_producer(self, producer):
+        msg = producer.more()
+        print "pushing more", msg
+        self.channel.basic_publish(exchange='',
+                    routing_key=props.reply_to,
+                    properties=pika.BasicProperties(correlation_id = \
+                    header_frame.correlation_id),
+                    body=msg)
+
+
+    def install_handler (self, handler, back=0):
+        if back:
+            self.handlers.append (handler)
+        else:
+            self.handlers.insert(0, handler)
+    def remove_handler (self, handler):
+        self.handlers.remove (handler)
+
+    def set_terminator(self, thing):
+        print "thing:", thing
+
+
 
 
 
@@ -790,7 +907,7 @@ def make_amqp_connection(options, supervisord):
 
         user_credentials = PlainCredentials(user, password)
         connection_params = ConnectionParameters(host=host, port=port, credentials=user_credentials)
-        ampq_connection = supervisor_amqp_connection(parameters = connection_params)
+        ampq_connection = supervisor_amqp_connection(parameters = connection_params, logger_object=wrapper)
         asyncore.socket_map.update({ampq_connection.socket.fileno(): ampq_connection.ioloop})
     
 
@@ -842,7 +959,7 @@ def make_amqp_connection(options, supervisord):
         # hs.install_handler(uihandler)
         # hs.install_handler(maintailhandler)
         # hs.install_handler(tailhandler)
-        #ampq_connection.install_handler(xmlrpchandler) # last for speed (first checked)
+        ampq_connection.install_handler(xmlrpchandler) # last for speed (first checked)
         brokers.append((config, ampq_connection.ioloop))
 
     return brokers

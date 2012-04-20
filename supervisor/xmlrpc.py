@@ -4,9 +4,14 @@ import xmlrpclib
 import httplib
 import urllib
 import re
+import uuid
 from cStringIO import StringIO
 import traceback
 import sys
+from pika.adapters import SelectConnection
+from pika.connection import ConnectionParameters
+from pika import BasicProperties
+import pika.log
 
 from supervisor.medusa.http_server import get_header
 from supervisor.medusa.xmlrpc_handler import xmlrpc_handler
@@ -114,7 +119,7 @@ class DeferredXMLRPCResponse:
 
         outgoing_header = producers.simple_producer (
             self.request.build_reply_header())
-
+        print "outgoing header:", outgoing_header
         if close_it:
             self.request['Connection'] = 'close'
 
@@ -323,6 +328,7 @@ class supervisor_xmlrpc_handler(xmlrpc_handler):
         return request.uri.startswith(self.path)
         
     def continue_request (self, data, request):
+        print "continue_request"
         logger = self.supervisord.options.logger
         
         try:
@@ -385,6 +391,7 @@ class supervisor_xmlrpc_handler(xmlrpc_handler):
             request.error(500)
 
     def call(self, method, params):
+        print "call:", method, params
         return traverse(self.rpcinterface, method, params)
 
 def traverse(ob, method, params):
@@ -404,6 +411,141 @@ def traverse(ob, method, params):
         raise RPCError(Faults.INCORRECT_PARAMETERS)
 
 class SupervisorTransport(xmlrpclib.Transport):
+    """
+    Provides a Transport for xmlrpclib that uses
+    httplib.HTTPConnection in order to support persistent
+    connections.  Also support basic auth and UNIX domain socket
+    servers.
+    """
+    connection = None
+
+    _use_datetime = 0 # python 2.5 fwd compatibility
+    def __init__(self, username=None, password=None, serverurl=None):
+        self.username = username
+        self.password = password
+        self.verbose = False
+        self.serverurl = serverurl
+        if serverurl.startswith('http://'):
+            type, uri = urllib.splittype(serverurl)
+            host, path = urllib.splithost(uri)
+            host, port = urllib.splitport(host)
+            if port is None:
+                port = 80
+            else:
+                port = int(port)
+            def get_connection(host=host, port=port):
+                return httplib.HTTPConnection(host, port)
+            self._get_connection = get_connection
+
+        elif serverurl.startswith('unix://'):
+            def get_connection(serverurl=serverurl):
+                # we use 'localhost' here because domain names must be
+                # < 64 chars (or we'd use the serverurl filename)
+                conn = UnixStreamHTTPConnection('localhost')
+                conn.socketfile = serverurl[7:]
+            self._get_connection = get_connection
+        
+        elif serverurl.startswith('ampq://'):
+            type, uri = urllib.splittype(serverurl)
+            host, path = urllib.splithost(uri)
+            host, port = urllib.splitport(host)
+            if port is None:
+                port = 5672
+            else:
+                port = int(port)
+
+            def get_connection(serverurl=serverurl):
+                conn = AMPQHTTPConnection(host, port) 
+                return conn
+            self._get_connection = get_connection
+
+        else:
+            raise ValueError('Unknown protocol for serverurl %s' % serverurl)
+
+    def request(self, host, handler, request_body, verbose=0):
+        if not self.connection:
+            self.connection = self._get_connection()
+            self.headers = {
+                "User-Agent" : self.user_agent,
+                "Content-Type" : "text/xml",
+                "Accept": "text/xml"
+                }
+            
+            # basic auth
+            if self.username is not None and self.password is not None:
+                unencoded = "%s:%s" % (self.username, self.password)
+                encoded = unencoded.encode('base64')
+                encoded = encoded.replace('\012', '')
+                self.headers["Authorization"] = "Basic %s" % encoded
+                
+        self.headers["Content-Length"] = str(len(request_body))
+
+        self.connection.request('POST', handler, request_body, self.headers)
+
+        #r = self.connection.getresponse()
+
+        #if r.status != 200:
+        #    self.connection.close()
+        #    self.connection = None
+        #    raise xmlrpclib.ProtocolError(host + handler,
+#                                          r.status,
+#                                          r.reason,
+#                                          '' )
+        #data = r.read()
+        #p, u = self.getparser()
+        #p.feed(data)
+        #p.close()
+        #return u.close()    
+        return ''
+class AMPQHTTPConnection:
+    def __init__(self, host, port):
+        params = pika.ConnectionParameters(host=host, port=port)
+        self.connection = pika.BlockingConnection(params)
+        self.channel = self.connection.channel()
+        self.result = self.channel.queue_declare(exclusive=True)
+        self.callback_queue = self.result.method.queue
+
+        self.channel.basic_consume(self.on_response, no_ack=True,
+                                   queue=self.callback_queue)
+    
+    def request(self, method, handler, request_body, headers):
+        print "request"
+        self.response = None
+        self.corr_id = str(uuid.uuid4())
+        properties = pika.BasicProperties(reply_to = self.callback_queue,
+            correlation_id = self.corr_id,)     
+        self.channel.basic_publish(exchange='',
+                      routing_key='test',
+                      body=self._get_message(method, headers, request_body))
+
+        while self.response is None:
+            self.connection.process_data_events()
+
+    def on_response(self, ch, method, props, body):
+        print "on_response"
+        print body
+        if self.corr_id == props.correlation_id:
+            self.response = body
+            print self.response
+
+    def getresponse(self):
+        print "_get response"
+        while self.response is None:
+            self.connection.process_data_events()
+        return self.response
+
+    def close(self):
+        self.connection.close()
+
+    def _get_message(self, method, headers, request_body):
+        head = "%s /RPC2 HTTP/1.1\n" % method
+        return head + \
+            "\n".join(["%s: %s" % (key, value) for (key,value) in headers.items()]) +\
+            "\n\n\t" +\
+            request_body +\
+            "\n\n"
+
+class SupervisorAMQPTransport(xmlrpclib.Transport):
     """
     Provides a Transport for xmlrpclib that uses
     httplib.HTTPConnection in order to support persistent
@@ -473,7 +615,9 @@ class SupervisorTransport(xmlrpclib.Transport):
         p, u = self.getparser()
         p.feed(data)
         p.close()
-        return u.close()    
+        return u.close()  
+
+
 
 class UnixStreamHTTPConnection(httplib.HTTPConnection):
     def connect(self):
@@ -561,6 +705,7 @@ if iterparse is not None:
     }
 
     def loads(data):
+        print "DATA: %s" % data 
         params = method = None
         for action, elem in iterparse(StringIO(data)):
             unmarshal = unmarshallers.get(elem.tag)
