@@ -1107,7 +1107,7 @@ class ServerOptions(Options):
 
     def connectamqpbroker(self, supervisord):
         try:
-            self.amqpconnection = self.make_amqp_connection(supervisord)
+            self.amqpservers = self.make_amqp_servers(supervisord)
         except Exception as e:
             traceback.print_exc(file=sys.stdout)
             self.usage(e)
@@ -1308,9 +1308,9 @@ class ServerOptions(Options):
         from supervisor.http import make_http_servers
         return make_http_servers(self, supervisord)
 
-    def make_amqp_connection(self, supervisord):
-        from supervisor.amqp import make_amqp_connection
-        return make_amqp_connection(self, supervisord)
+    def make_amqp_servers(self, supervisord):
+        from supervisor.amqp import make_amqp_servers
+        return make_amqp_servers(self, supervisord)
 
     def close_fd(self, fd):
         try:

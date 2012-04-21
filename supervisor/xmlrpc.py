@@ -509,14 +509,16 @@ class AMPQHTTPConnection:
                                    queue=self.callback_queue)
     
     def request(self, method, handler, request_body, headers):
-        print "request"
+        from pdb import set_trace; set_trace()
         self.response = None
         self.corr_id = str(uuid.uuid4())
+        print "request", self.corr_id
         properties = pika.BasicProperties(reply_to = self.callback_queue,
             correlation_id = self.corr_id,)     
         self.channel.basic_publish(exchange='',
                       routing_key='test',
-                      body=self._get_message(method, headers, request_body))
+                      body=self._get_message(method, headers, request_body),
+                      properties =properties)
 
         while self.response is None:
             self.connection.process_data_events()

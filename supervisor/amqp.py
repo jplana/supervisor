@@ -7,6 +7,7 @@ import socket
 import errno
 import pwd
 import urllib
+import pika
 
 
 try:
@@ -15,6 +16,7 @@ except ImportError:
     from sha import new as sha1
 
 from supervisor.medusa import asyncore_25 as asyncore
+from supervisor.medusa import asynchat_25 as asynchat
 from supervisor.medusa import http_date
 from supervisor.medusa import http_server
 from supervisor.medusa import producers
@@ -137,11 +139,15 @@ class deferring_hooked_producer:
             return ''
 
 
-class deferring_http_request(http_server.http_request):
+class deferring_amqp_request(http_server.http_request):
     """ The medusa http_request class uses the default set of producers in
     medusa.prodcers.  We can't use these because they don't know anything about
     deferred responses, so we override various methods here.  This was added
     to support tail -f like behavior on the logtail handler """
+
+    def __init__(self, channel, body, command, uri, version, header, props):
+        http_server.http_request.__init__(self, channel, body, command, uri, version, header)
+        self.props = props
 
     def get_header(self, header):
         # this is overridden purely for speed (the base class doesn't
@@ -238,7 +244,7 @@ class deferring_http_request(http_server.http_request):
             outgoing_producer = deferring_globbing_producer(outgoing_producer)
 
         print "Aqui!!!!"
-        self.channel.push_with_producer(outgoing_producer)
+        self.channel.push_with_producer(outgoing_producer, self.props)
 
         self.channel.current_request = None
 
@@ -347,166 +353,33 @@ class deferring_http_request(http_server.http_request):
             server_url=server_url[:-1]
         return server_url
 
-class deferring_http_channel(http_server.http_channel):
 
-    # use a 4906-byte buffer size instead of the default 65536-byte buffer in
-    # order to spew tail -f output faster (speculative)
-    ac_out_buffer_size = 4096
-    
-    delay = False
-    writable_check = time.time()
 
-    def writable(self, t=time.time):
-        now = t()
-        if self.delay:
-            # we called a deferred producer via this channel (see refill_buffer)
-            last_writable_check = self.writable_check
-            self.writable_check = now
-            elapsed = now - last_writable_check
-            if elapsed > self.delay:
-                return True
-            else:
-                return False
 
-        return http_server.http_channel.writable(self)
+# ===========================================================================
+#                                                AMQP Server Object
+# ===========================================================================
 
-    def refill_buffer (self):
-        """ Implement deferreds """
-        while 1:
-            if len(self.producer_fifo):
-                p = self.producer_fifo.first()
-                # a 'None' in the producer fifo is a sentinel,
-                # telling us to close the channel.
-                if p is None:
-                    if not self.ac_out_buffer:
-                        self.producer_fifo.pop()
-                        self.close()
-                    return
-                elif isinstance(p, str):
-                    self.producer_fifo.pop()
-                    self.ac_out_buffer = self.ac_out_buffer + p
-                    return
-
-                data = p.more()
-
-                if data is NOT_DONE_YET:
-                    self.delay = p.delay
-                    return
-
-                elif data:
-                    self.ac_out_buffer = self.ac_out_buffer + data
-                    return
-                else:
-                    self.producer_fifo.pop()
-            else:
-                return
-
-    def found_terminator (self):
-        """ We only override this to use 'deferring_http_request' class
-        instead of the normal http_request class; it sucks to need to override
-        this """
-        if self.current_request:
-            self.current_request.found_terminator()
-        else:
-            header = self.in_buffer
-            self.in_buffer = ''
-            lines = header.split('\r\n')
-
-            # --------------------------------------------------
-            # crack the request header
-            # --------------------------------------------------
-
-            while lines and not lines[0]:
-                # as per the suggestion of http-1.1 section 4.1, (and
-                # Eric Parker <eparker@zyvex.com>), ignore a leading
-                # blank lines (buggy browsers tack it onto the end of
-                # POST requests)
-                lines = lines[1:]
-
-            if not lines:
-                self.close_when_done()
-                return
-
-            request = lines[0]
-
-            command, uri, version = http_server.crack_request (request)
-            header = http_server.join_headers (lines[1:])
-
-            # unquote path if necessary (thanks to Skip Montanaro for pointing
-            # out that we must unquote in piecemeal fashion).
-            rpath, rquery = http_server.splitquery(uri)
-            if '%' in rpath:
-                if rquery:
-                    uri = http_server.unquote (rpath) + '?' + rquery
-                else:
-                    uri = http_server.unquote (rpath)
-
-            r = deferring_http_request (self, request, command, uri, version,
-                                         header)
-            self.request_counter.increment()
-            self.server.total_requests.increment()
-
-            if command is None:
-                self.log_info ('Bad HTTP request: %s' % repr(request), 'error')
-                r.error (400)
-                return
-
-            # --------------------------------------------------
-            # handler selection and dispatch
-            # --------------------------------------------------
-            for h in self.server.handlers:
-                if h.match (r):
-                    try:
-                        self.current_request = r
-                        # This isn't used anywhere.
-                        # r.handler = h # CYCLE
-                        h.handle_request (r)
-                    except:
-                        self.server.exceptions.increment()
-                        (file, fun, line), t, v, tbinfo = \
-                               asyncore.compact_traceback()
-                        self.server.log_info(
-                            'Server Error: %s, %s: file: %s line: %s' %
-                            (t,v,file,line),
-                            'error')
-                        try:
-                            r.error (500)
-                        except:
-                            pass
-                    return
-
-            # no handlers, so complain
-            r.error (404)
-
-class supervisor_http_server(http_server.http_server):
-    channel_class = deferring_http_channel
+class supervisor_amqp_server(AsyncoreConnection):
     ip = None
 
-    def prebind(self, sock, logger_object):
-        """ Override __init__ to do logger setup earlier so it can
-        go to our logger object instead of stdout """
-        from supervisor.medusa import logger
-
-        if not logger_object:
-            logger_object = logger.file_logger(sys.stdout)
-
-        logger_object = logger.unresolving_logger(logger_object)
-        self.logger = logger_object
-
-        asyncore.dispatcher.__init__ (self)
-        self.set_socket(sock)
-
-        self.handlers = []
-
-        sock.setblocking(0)
-        self.set_reuse_addr()
+    def __init__(self, parameters, queue, logger_object):        
         
-    def postbind(self):
+        AsyncoreConnection.__init__(self, 
+            parameters, 
+            on_open_callback=self._on_connect)
+        
+        self.handlers = []
+        self.server = self
+        self.parameters = parameters
+        self.logger = logger.unresolving_logger (logger_object)
+        self.queue = queue
+        current_request = None
+        self.addr = parameters.host, parameters.port
+
         from supervisor.medusa.counter import counter
-        from supervisor.medusa.http_server import VERSION_STRING
-
-        self.listen(1024)
-
+        self.channel_counter = counter()
+        self.request_counter = counter()
         self.total_clients = counter()
         self.total_requests = counter()
         self.exceptions = counter()
@@ -514,14 +387,13 @@ class supervisor_http_server(http_server.http_server):
         self.bytes_in  = counter()
 
         self.log_info (
-                'Medusa (V%s) started at %s'
+                'Medusa AMQP started at %s'
                 '\n\tHostname: %s'
                 '\n\tPort:%s'
                 '\n' % (
-                        VERSION_STRING,
                         time.ctime(time.time()),
-                        self.server_name,
-                        self.port,
+                        self.parameters.host,
+                        self.parameters.port,
                         )
                 )
 
@@ -530,6 +402,125 @@ class supervisor_http_server(http_server.http_server):
         if getattr(self, 'ip', None) is not None:
             ip = self.ip
         self.logger.log(ip, message)
+
+    def _on_connect(self, connection):
+        self.log_info (
+                'Medusa AMQP connected at %s' %
+                        time.ctime(time.time()))
+
+        self.connection = connection.channel(self._on_channel_open)
+    
+    def _on_channel_open(self, channel):
+        self.channel = channel
+        self.log_info (
+                'Medusa AMQP channel opened at %s' % 
+                        time.ctime(time.time()))
+
+        self.channel.queue_declare(queue=self.queue,
+                          durable=True,
+                          exclusive=False,
+                          auto_delete=False,
+                          callback=self._on_queue_declared)
+
+ 
+    def _on_queue_declared(self, frame):
+        self.log_info (
+                'Medusa AMQP queue %s opened at %s' % (self.queue, time.ctime(time.time())))
+        self.channel.basic_consume(self.handle_delivery, queue=self.queue)
+
+
+    def handle_delivery(self, channel, method_frame, header_frame, body):
+        self.total_clients.increment()
+
+        self.channel = channel
+        self.log_info (
+                'Medusa AMQP handling_delivery at %s' % 
+                        time.ctime(time.time()))
+
+        print channel, method_frame, header_frame, body
+
+        self.request_counter.increment()
+        self.server.total_requests.increment()
+        self.server.channel.basic_ack(delivery_tag=method_frame.delivery_tag)
+
+        http_head, http_headers = body.splitlines()[0], body.splitlines()[1:] 
+        print  "* | %s" %  (http_headers)
+        
+        command, uri, version = crack_request(http_head)
+        print command, uri, version
+        
+        if command is None:
+            self.log_info ('Bad HTTP request: %s' % repr(request), 'error')
+            r.error (400)
+            return
+        
+        header = join_headers (http_headers)
+        print "header:::::", header
+        # unquote path if necessary (thanks to Skip Montanaro for pointing
+        # out that we must unquote in piecemeal fashion).
+        rpath, rquery = splitquery(uri)
+        if '%' in rpath:
+            if rquery:
+                uri = unquote (rpath) + '?' + rquery
+            else:
+                uri = unquote (rpath)
+
+
+        # --------------------------------------------------
+        # handler selection and dispatch
+        # --------------------------------------------------
+        r = deferring_amqp_request (self, body, command, uri, version, header, header_frame)
+
+        print "Aqui", self.handlers
+        for h in self.handlers:
+            print "handler", h
+            if h.match (r):
+                print "Matched!"
+                try:
+                    self.current_request = r
+                    # This isn't used anywhere.
+                    # r.handler = h # CYCLE
+                    h.handle_request (r)
+                    h.continue_request(body.split('\t')[-1], r)
+                    
+                except:
+                    self.server.exceptions.increment()
+                    (file, fun, line), t, v, tbinfo = asyncore.compact_traceback()
+                    print (file, fun, line), t, v, tbinfo
+                    try:
+                        r.error (500)
+                    except:
+                        pass
+                return
+        
+
+    def install_handler (self, handler, back=0):
+        if back:
+            self.handlers.append (handler)
+        else:
+            self.handlers.insert (0, handler)
+
+    def remove_handler (self, handler):
+        self.handlers.remove (handler)
+
+    def push_with_producer(self, producer, props):
+        msg = producer.more()
+        print "props", props
+        print "pushing more", msg
+        self.channel.basic_publish(exchange='',
+                    routing_key=props.reply_to,
+                    properties=pika.BasicProperties(correlation_id = \
+                    props.correlation_id),
+                    body=msg)
+    
+    def log (self, bytes):
+        pass
+
+    def set_terminator(self, thing):
+        pass
+
+
+
 
 
 def join_headers (headers):
@@ -574,6 +565,10 @@ def crack_request (r):
     else:
         return None, None, None  
 
+
+
+
+
 class supervisor_amqp_connection(AsyncoreConnection):
 
     def __init__(self, parameters, logger_object):        
@@ -601,17 +596,24 @@ class supervisor_amqp_connection(AsyncoreConnection):
 
 
     def handle_delivery(self, channel, method_frame, header_frame, body):
+        
         print channel, method_frame, header_frame, body
+        
         print "Basic.Deliver %s delivery-tag %i: %s" %\
           (header_frame.content_type,
            method_frame.delivery_tag,
            body)
 
         self.channel.basic_ack(delivery_tag=method_frame.delivery_tag)
+        
         http_head, http_headers = body.splitlines()[0], body.splitlines()[2:] 
+        
         print  "* | %s" %  (http_headers)
+        
         command, uri, version = crack_request(http_head)
+        
         print command, uri, version
+        
         if not command:
             return
         header = join_headers (http_headers)
@@ -655,15 +657,6 @@ class supervisor_amqp_connection(AsyncoreConnection):
                         pass
                 return
 
-    def push_with_producer(self, producer):
-        msg = producer.more()
-        print "pushing more", msg
-        self.channel.basic_publish(exchange='',
-                    routing_key=props.reply_to,
-                    properties=pika.BasicProperties(correlation_id = \
-                    header_frame.correlation_id),
-                    body=msg)
-
 
     def install_handler (self, handler, back=0):
         if back:
@@ -677,223 +670,7 @@ class supervisor_amqp_connection(AsyncoreConnection):
         print "thing:", thing
 
 
-
-
-
-class supervisor_af_unix_http_server(supervisor_http_server):
-    """ AF_UNIX version of supervisor HTTP server """
-
-    def __init__(self, socketname, sockchmod, sockchown, logger_object):
-        self.ip = socketname
-        self.port = socketname
-
-        # XXX this is insecure.  We really should do something like
-        # http://developer.apple.com/samplecode/CFLocalServer/listing6.html
-        # (see also http://developer.apple.com/technotes/tn2005/tn2083.html#SECUNIXDOMAINSOCKETS)
-        # but it would be very inconvenient for the user to need to get all
-        # the directory setup right.
-
-        tempname = "%s.%d" % (socketname, os.getpid())
-
-        try:
-            os.unlink(tempname)
-        except OSError:
-            pass
-
-        while 1:
-            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            try:
-                sock.bind(tempname)
-                os.chmod(tempname, sockchmod)
-                try:
-                    # hard link
-                    os.link(tempname, socketname)
-                except OSError:
-                    # Lock contention, or stale socket.
-                    used = self.checkused(socketname)
-                    if used:
-                        # cooperate with 'openhttpserver' in supervisord
-                        raise socket.error(errno.EADDRINUSE)
-                        
-                    # Stale socket -- delete, sleep, and try again.
-                    msg = "Unlinking stale socket %s\n" % socketname
-                    sys.stderr.write(msg)
-                    try:
-                        os.unlink(socketname)
-                    except:
-                        pass
-                    sock.close()
-                    time.sleep(.3)
-                    continue
-                else:
-                    try:
-                        os.chown(socketname, sockchown[0], sockchown[1])
-                    except OSError, why:
-                        if why[0] == errno.EPERM:
-                            msg = ('Not permitted to chown %s to uid/gid %s; '
-                                   'adjust "sockchown" value in config file or '
-                                   'on command line to values that the '
-                                   'current user (%s) can successfully chown')
-                            raise ValueError(msg % (socketname,
-                                                    repr(sockchown),
-                                                    pwd.getpwuid(
-                                                        os.geteuid())[0],
-                                                    ),
-                                             )
-                        else:
-                            raise
-                    self.prebind(sock, logger_object)
-                    break
-
-            finally:
-                try:
-                    os.unlink(tempname)
-                except OSError:
-                    pass
-
-        self.server_name = '<unix domain socket>'
-        self.postbind()
-
-    def checkused(self, socketname):
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        try:
-            s.connect(socketname)
-            s.send("GET / HTTP/1.0\r\n\r\n")
-            data = s.recv(1)
-            s.close()
-        except socket.error:
-            return False
-        else:
-            return True
-
-class tail_f_producer:
-    def __init__(self, request, filename, head):
-        self.file = open(filename, 'rb')
-        self.request = request
-        self.delay = 0.1
-        sz = self.fsize()
-        if sz >= head:
-            self.sz = sz - head
-        else:
-            self.sz = 0
-
-    def more(self):
-        try:
-            newsz = self.fsize()
-        except OSError:
-            # file descriptor was closed
-            return ''
-        bytes_added = newsz - self.sz
-        if bytes_added < 0:
-            self.sz = 0
-            return "==> File truncated <==\n"
-        if bytes_added > 0:
-            self.file.seek(-bytes_added, 2)
-            bytes = self.file.read(bytes_added)
-            self.sz = newsz
-            return bytes
-        return NOT_DONE_YET
-
-    def fsize(self):
-        return os.fstat(self.file.fileno())[stat.ST_SIZE]
-
-class logtail_handler:
-    IDENT = 'Logtail HTTP Request Handler'
-    path = '/logtail'
-
-    def __init__(self, supervisord):
-        self.supervisord = supervisord
-
-    def match(self, request):
-        return request.uri.startswith(self.path)
-        
-    def handle_request(self, request):
-        if request.command != 'GET':
-            request.error (400) # bad request
-            return
-
-        path, params, query, fragment = request.split_uri()
-
-        if '%' in path:
-            path = http_server.unquote(path)
-
-        # strip off all leading slashes
-        while path and path[0] == '/':
-            path = path[1:]
-
-        path, process_name_and_channel = path.split('/', 1)
-
-        try:
-            process_name, channel = process_name_and_channel.split('/', 1)
-        except ValueError:
-            # no channel specified, default channel to stdout
-            process_name = process_name_and_channel
-            channel = 'stdout'
-
-        from supervisor.options import split_namespec
-        group_name, process_name = split_namespec(process_name)
-
-        group = self.supervisord.process_groups.get(group_name)
-        if group is None:
-            request.error(404) # not found
-            return
-
-        process = group.processes.get(process_name)
-        if process is None:
-            request.error(404) # not found
-            return
-
-        logfile = getattr(process.config, '%s_logfile' % channel, None)
-
-        if logfile is None or not os.path.exists(logfile):
-            # XXX problematic: processes that don't start won't have a log
-            # file and we probably don't want to go into fatal state if we try
-            # to read the log of a process that did not start.
-            request.error(410) # gone
-            return
-
-        mtime = os.stat(logfile)[stat.ST_MTIME]
-        request['Last-Modified'] = http_date.build_http_date(mtime)
-        request['Content-Type'] = 'text/plain'
-        # the lack of a Content-Length header makes the outputter
-        # send a 'Transfer-Encoding: chunked' response
-
-        request.push(tail_f_producer(request, logfile, 1024))
-
-        request.done()
-
-class mainlogtail_handler:
-    IDENT = 'Main Logtail HTTP Request Handler'
-    path = '/mainlogtail'
-
-    def __init__(self, supervisord):
-        self.supervisord = supervisord
-
-    def match(self, request):
-        return request.uri.startswith(self.path)
-
-    def handle_request(self, request):
-        if request.command != 'GET':
-            request.error (400) # bad request
-            return
-
-        logfile = self.supervisord.options.logfile
-
-        if logfile is None or not os.path.exists(logfile):
-            request.error(410) # gone
-            return
-
-        mtime = os.stat(logfile)[stat.ST_MTIME]
-        request['Last-Modified'] = http_date.build_http_date(mtime)
-        request['Content-Type'] = 'text/plain'
-        # the lack of a Content-Length header makes the outputter
-        # send a 'Transfer-Encoding: chunked' response
-
-        request.push(tail_f_producer(request, logfile, 1024))
-
-        request.done()
-
-def make_amqp_connection(options, supervisord):
+def make_amqp_servers(options, supervisord):
     brokers = []
     class LogWrapper:
         def log(self, msg):
@@ -907,7 +684,7 @@ def make_amqp_connection(options, supervisord):
 
         user_credentials = PlainCredentials(user, password)
         connection_params = ConnectionParameters(host=host, port=port, credentials=user_credentials)
-        ampq_connection = supervisor_amqp_connection(parameters = connection_params, logger_object=wrapper)
+        ampq_connection = supervisor_amqp_server(parameters = connection_params, queue='test', logger_object=wrapper)
         asyncore.socket_map.update({ampq_connection.socket.fileno(): ampq_connection.ioloop})
     
 
@@ -963,26 +740,3 @@ def make_amqp_connection(options, supervisord):
         brokers.append((config, ampq_connection.ioloop))
 
     return brokers
-
-class encrypted_dictionary_authorizer:
-    def __init__ (self, dict):
-        self.dict = dict
-
-    def authorize(self, auth_info):
-        username, password = auth_info
-        if self.dict.has_key(username):
-            stored_password = self.dict[username]
-            if stored_password.startswith('{SHA}'):
-                password_hash = sha1(password).hexdigest()
-                return stored_password[5:] == password_hash
-            else:
-                return stored_password == password
-        else:
-            return False
-
-class supervisor_auth_handler(auth_handler):
-    def __init__(self, dict, handler, realm='default'):
-        auth_handler.__init__(self, dict, handler, realm)
-        # override the authorizer with one that knows about SHA hashes too
-        self.authorizer = encrypted_dictionary_authorizer(dict)
-        
