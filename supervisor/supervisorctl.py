@@ -193,6 +193,7 @@ class Controller(cmd.Cmd):
             return getattr(proxy, namespace)
 
     def upcheck(self):
+
         try:
             supervisor = self.get_supervisor()
             api = supervisor.getVersion() # deprecated

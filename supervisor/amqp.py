@@ -244,7 +244,7 @@ class deferring_amqp_request(http_server.http_request):
             outgoing_producer = deferring_globbing_producer(outgoing_producer)
 
         print "Aqui!!!!"
-        self.channel.push_with_producer(outgoing_producer, self.props)
+        self.channel.push_with_producer(outgoing_producer, props=self.props)
 
         self.channel.current_request = None
 
@@ -436,8 +436,8 @@ class supervisor_amqp_server(AsyncoreConnection):
         self.log_info (
                 'Medusa AMQP handling_delivery at %s' % 
                         time.ctime(time.time()))
-
         print channel, method_frame, header_frame, body
+        self.props = header_frame
 
         self.request_counter.increment()
         self.server.total_requests.increment()
@@ -503,16 +503,18 @@ class supervisor_amqp_server(AsyncoreConnection):
     def remove_handler (self, handler):
         self.handlers.remove (handler)
 
-    def push_with_producer(self, producer, props):
+    def push_with_producer(self, producer, props = None):
+        if not props:
+            props = self.props
         msg = producer.more()
-        print "props", props
         print "pushing more", msg
-        self.channel.basic_publish(exchange='',
-                    routing_key=props.reply_to,
-                    properties=pika.BasicProperties(correlation_id = \
-                    props.correlation_id),
-                    body=msg)
-    
+        if type(msg) == type(''):
+            self.channel.basic_publish(exchange='',
+                        routing_key=props.reply_to,
+                        properties=pika.BasicProperties(correlation_id = \
+                        props.correlation_id),
+                        body=msg)
+        
     def log (self, bytes):
         pass
 
@@ -640,7 +642,6 @@ class supervisor_amqp_connection(AsyncoreConnection):
                 print "Matched!"
                 try:
                     self.current_request = r
-#                    import pdb; pdb.set_trace()
 #                    print dir(r)
                     # This isn't used anywhere.
                     # r.handler = h # CYCLE

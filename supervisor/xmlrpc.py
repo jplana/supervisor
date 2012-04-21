@@ -482,21 +482,33 @@ class SupervisorTransport(xmlrpclib.Transport):
 
         self.connection.request('POST', handler, request_body, self.headers)
 
-        #r = self.connection.getresponse()
+        r = self.connection.getresponse()
 
-        #if r.status != 200:
-        #    self.connection.close()
-        #    self.connection = None
-        #    raise xmlrpclib.ProtocolError(host + handler,
-#                                          r.status,
-#                                          r.reason,
-#                                          '' )
-        #data = r.read()
-        #p, u = self.getparser()
-        #p.feed(data)
-        #p.close()
-        #return u.close()    
-        return ''
+        if r.status != 200:
+            self.connection.close()
+            self.connection = None
+            raise xmlrpclib.ProtocolError(host + handler,
+                                          r.status,
+                                          r.reason,
+                                          '' )
+        data = r.read()
+        p, u = self.getparser()
+        p.feed(data)
+        p.close()
+        return u.close()    
+
+
+class AMQPHTTPResponse:
+    def __init__(self, body):
+        self.http_version, self.status, self.reason = re.match('HTTP/([\d\.]*)\s(\d*)\s(\w*)', body.split('\n')[0]).groups(0)
+        self.status = int(self.status)
+        self.body = body.split('\r\n\r\n')[-1]
+        print "BODY$%s$" %  self.body
+    def read(self):
+        return self.body
+
+
+
 class AMPQHTTPConnection:
     def __init__(self, host, port):
         params = pika.ConnectionParameters(host=host, port=port)
@@ -508,13 +520,17 @@ class AMPQHTTPConnection:
         self.channel.basic_consume(self.on_response, no_ack=True,
                                    queue=self.callback_queue)
     
+        self.handlers = {}
+
     def request(self, method, handler, request_body, headers):
-        from pdb import set_trace; set_trace()
         self.response = None
         self.corr_id = str(uuid.uuid4())
+        self.handlers[self.corr_id] = handler
         print "request", self.corr_id
+        
         properties = pika.BasicProperties(reply_to = self.callback_queue,
             correlation_id = self.corr_id,)     
+        
         self.channel.basic_publish(exchange='',
                       routing_key='test',
                       body=self._get_message(method, headers, request_body),
@@ -523,11 +539,13 @@ class AMPQHTTPConnection:
         while self.response is None:
             self.connection.process_data_events()
 
+
     def on_response(self, ch, method, props, body):
         print "on_response"
         print body
-        if self.corr_id == props.correlation_id:
-            self.response = body
+        if props.correlation_id in self.handlers:
+            handler = self.handlers[props.correlation_id]
+            self.response = AMQPHTTPResponse(body)
             print self.response
 
     def getresponse(self):
