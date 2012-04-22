@@ -119,7 +119,6 @@ class DeferredXMLRPCResponse:
 
         outgoing_header = producers.simple_producer (
             self.request.build_reply_header())
-        print "outgoing header:", outgoing_header
         if close_it:
             self.request['Connection'] = 'close'
 
@@ -328,7 +327,6 @@ class supervisor_xmlrpc_handler(xmlrpc_handler):
         return request.uri.startswith(self.path)
         
     def continue_request (self, data, request):
-        print "continue_request"
         logger = self.supervisord.options.logger
         
         try:
@@ -391,7 +389,6 @@ class supervisor_xmlrpc_handler(xmlrpc_handler):
             request.error(500)
 
     def call(self, method, params):
-        print "call:", method, params
         return traverse(self.rpcinterface, method, params)
 
 def traverse(ob, method, params):
@@ -503,7 +500,6 @@ class AMQPHTTPResponse:
         self.http_version, self.status, self.reason = re.match('HTTP/([\d\.]*)\s(\d*)\s(\w*)', body.split('\n')[0]).groups(0)
         self.status = int(self.status)
         self.body = body.split('\r\n\r\n')[-1]
-        print "BODY$%s$" %  self.body
     def read(self):
         return self.body
 
@@ -526,7 +522,6 @@ class AMPQHTTPConnection:
         self.response = None
         self.corr_id = str(uuid.uuid4())
         self.handlers[self.corr_id] = handler
-        print "request", self.corr_id
         
         properties = pika.BasicProperties(reply_to = self.callback_queue,
             correlation_id = self.corr_id,)     
@@ -541,15 +536,11 @@ class AMPQHTTPConnection:
 
 
     def on_response(self, ch, method, props, body):
-        print "on_response"
-        print body
         if props.correlation_id in self.handlers:
             handler = self.handlers[props.correlation_id]
             self.response = AMQPHTTPResponse(body)
-            print self.response
 
     def getresponse(self):
-        print "_get response"
         while self.response is None:
             self.connection.process_data_events()
         return self.response
@@ -725,7 +716,6 @@ if iterparse is not None:
     }
 
     def loads(data):
-        print "DATA: %s" % data 
         params = method = None
         for action, elem in iterparse(StringIO(data)):
             unmarshal = unmarshallers.get(elem.tag)

@@ -266,10 +266,8 @@ class http_request:
         if type(thing) == type(''):
             self.outgoing.append(producers.simple_producer(thing,
               buffer_size=len(thing)))
-            print "OUTGOING", self.outgoing
         else:
             self.outgoing.append(thing)
-            print "OUTGOING", self.outgoing
 
     def response (self, code=200):
         message = self.responses[code]

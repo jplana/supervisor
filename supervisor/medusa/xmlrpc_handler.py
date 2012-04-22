@@ -16,7 +16,6 @@ import sys
 class xmlrpc_handler:
 
     def match (self, request):
-        print "Match:", request.uri[:5]
         # Note: /RPC2 is not required by the spec, so you may override this method.
         if request.uri[:5] == '/RPC2':
             return 1
@@ -24,11 +23,9 @@ class xmlrpc_handler:
             return 0
 
     def handle_request (self, request):
-        print "Handling..", request
         [path, params, query, fragment] = request.split_uri()
 
         if request.command == 'POST':
-            print "POST"
             request.collector = collector (self, request)
         else:
             request.error (400)
@@ -94,7 +91,6 @@ if __name__ == '__main__':
     class rpc_demo (xmlrpc_handler):
 
         def call (self, method, params):
-            print 'method="%s" params=%s' % (method, params)
             return "Sure, that works"
 
     import asyncore_25 as asyncore

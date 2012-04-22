@@ -45,16 +45,12 @@ class deferring_chunked_producer:
             if data is NOT_DONE_YET:
                 return NOT_DONE_YET
             elif data:
-                print "deferring_chunked_producer", '%x\r\n%s\r\n' % (len(data), data)
                 return '%x\r\n%s\r\n' % (len(data), data)
             else:
                 self.producer = None
                 if self.footers:
-                    print "deferring_chunked_producer", '\r\n'.join(['0'] + self.footers) + '\r\n\r\n'
                     return '\r\n'.join(['0'] + self.footers) + '\r\n\r\n'
                 else:
-                    print "deferring_chunked_producer", '0\r\n\r\n' 
-
                     return '0\r\n\r\n'
         else:
             return ''
@@ -72,7 +68,6 @@ class deferring_composite_producer:
             if d is NOT_DONE_YET:
                 return NOT_DONE_YET
             if d:
-                print "deferring_composite_producer", d 
                 return d
             else:
                 self.producers.pop(0)
@@ -104,7 +99,6 @@ class deferring_globbing_producer:
                 break
         r = self.buffer
         self.buffer = ''
-        print "deferring_globbing_producer: ", r
         return r
 
 
@@ -237,7 +231,6 @@ class deferring_http_request(http_server.http_request):
             outgoing_producer = deferring_globbing_producer(outgoing_producer)
 
         self.channel.push_with_producer(outgoing_producer)
-        print outgoing_producer
         self.channel.current_request = None
 
         if close_it:
@@ -404,7 +397,6 @@ class deferring_http_channel(http_server.http_channel):
         instead of the normal http_request class; it sucks to need to override
         this """
         if self.current_request:
-            print ""
             self.current_request.found_terminator()
         else:
             header = self.in_buffer
@@ -427,7 +419,6 @@ class deferring_http_channel(http_server.http_channel):
                 return
 
             request = lines[0]
-            print "lines", lines
             command, uri, version = http_server.crack_request (request)
             header = http_server.join_headers (lines[1:])
 

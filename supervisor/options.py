@@ -963,7 +963,6 @@ class ServerOptions(Options):
             config['section'] = section
             config.update(self._parse_username_and_password(parser, section))
             configs.append(config)
-            print configs
         return configs
 
 
@@ -1139,7 +1138,6 @@ class ServerOptions(Options):
                     self.logger.warn('Failed to clean up %r' % pathname)
 
     def get_socket_map(self):
-        print asyncore.socket_map
         return asyncore.socket_map
 
     def cleanup_fds(self):

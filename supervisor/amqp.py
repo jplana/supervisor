@@ -243,7 +243,6 @@ class deferring_amqp_request(http_server.http_request):
         if globbing:
             outgoing_producer = deferring_globbing_producer(outgoing_producer)
 
-        print "Aqui!!!!"
         self.channel.push_with_producer(outgoing_producer, props=self.props)
 
         self.channel.current_request = None
@@ -353,9 +352,6 @@ class deferring_amqp_request(http_server.http_request):
             server_url=server_url[:-1]
         return server_url
 
-
-
-
 # ===========================================================================
 #                                                AMQP Server Object
 # ===========================================================================
@@ -431,12 +427,9 @@ class supervisor_amqp_server(AsyncoreConnection):
 
     def handle_delivery(self, channel, method_frame, header_frame, body):
         self.total_clients.increment()
-
         self.channel = channel
         self.log_info (
-                'Medusa AMQP handling_delivery at %s' % 
-                        time.ctime(time.time()))
-        print channel, method_frame, header_frame, body
+                'Medusa AMQP handling_delivery of %s' % header_frame)
         self.props = header_frame
 
         self.request_counter.increment()
@@ -444,18 +437,16 @@ class supervisor_amqp_server(AsyncoreConnection):
         self.server.channel.basic_ack(delivery_tag=method_frame.delivery_tag)
 
         http_head, http_headers = body.splitlines()[0], body.splitlines()[1:] 
-        print  "* | %s" %  (http_headers)
         
         command, uri, version = crack_request(http_head)
-        print command, uri, version
-        
+        self.log_info ('HTTP %s request: %s %s' % (version, command, uri))          
+
         if command is None:
             self.log_info ('Bad HTTP request: %s' % repr(request), 'error')
             r.error (400)
             return
         
         header = join_headers (http_headers)
-        print "header:::::", header
         # unquote path if necessary (thanks to Skip Montanaro for pointing
         # out that we must unquote in piecemeal fashion).
         rpath, rquery = splitquery(uri)
@@ -471,11 +462,8 @@ class supervisor_amqp_server(AsyncoreConnection):
         # --------------------------------------------------
         r = deferring_amqp_request (self, body, command, uri, version, header, header_frame)
 
-        print "Aqui", self.handlers
         for h in self.handlers:
-            print "handler", h
             if h.match (r):
-                print "Matched!"
                 try:
                     self.current_request = r
                     # This isn't used anywhere.
@@ -486,7 +474,6 @@ class supervisor_amqp_server(AsyncoreConnection):
                 except:
                     self.server.exceptions.increment()
                     (file, fun, line), t, v, tbinfo = asyncore.compact_traceback()
-                    print (file, fun, line), t, v, tbinfo
                     try:
                         r.error (500)
                     except:
@@ -507,10 +494,8 @@ class supervisor_amqp_server(AsyncoreConnection):
         if not props:
             props = self.props
         msg = producer.more()
-        print "pushing more", msg
 
         if not type(msg) == type(''):
-            print "Not done yet"
             return NOT_DONE_YET
         
         self.channel.basic_publish(exchange='',
@@ -524,13 +509,16 @@ class supervisor_amqp_server(AsyncoreConnection):
 
     def set_terminator(self, thing):
         pass
+  
+    def handle_connect(self):
+        self.log_info (
+                'handle_connect' % (time.ctime(time.time())))
 
 
 
 
 
 def join_headers (headers):
-    print "Join_HEaders", headers
     r = []
     for i in range(len(headers)):
         
@@ -572,107 +560,6 @@ def crack_request (r):
         return None, None, None  
 
 
-
-
-
-class supervisor_amqp_connection(AsyncoreConnection):
-
-    def __init__(self, parameters, logger_object):        
-        AsyncoreConnection.__init__(self, parameters, on_open_callback=self._on_connect)
-        self.handlers = []
-        self.server = self
-        self.addr = parameters.host, parameters.port 
-        self.logger = logger.unresolving_logger (logger_object)
-
-    def _on_connect(self, connection):
-        print "_on_connect"
-        connection.channel(self._on_channel_open)
-       
-    def _on_channel_open(self, channel):
-        self.channel = channel
-        print "_on_channel_open"
-        self.channel.queue_declare(queue="test",
-                          durable=True,
-                          exclusive=False,
-                          auto_delete=False,
-                          callback=self._on_queue_declared)
-    def _on_queue_declared(self, frame):
-        print "_on_queue_declared"
-        self.channel.basic_consume(self.handle_delivery, queue='test')
-
-
-    def handle_delivery(self, channel, method_frame, header_frame, body):
-        
-        print channel, method_frame, header_frame, body
-        
-        print "Basic.Deliver %s delivery-tag %i: %s" %\
-          (header_frame.content_type,
-           method_frame.delivery_tag,
-           body)
-
-        self.channel.basic_ack(delivery_tag=method_frame.delivery_tag)
-        
-        http_head, http_headers = body.splitlines()[0], body.splitlines()[2:] 
-        
-        print  "* | %s" %  (http_headers)
-        
-        command, uri, version = crack_request(http_head)
-        
-        print command, uri, version
-        
-        if not command:
-            return
-        header = join_headers (http_headers)
-
-        # unquote path if necessary (thanks to Skip Montanaro for pointing
-        # out that we must unquote in piecemeal fashion).
-        rpath, rquery = splitquery(uri)
-        if '%' in rpath:
-            if rquery:
-                uri = unquote (rpath) + '?' + rquery
-            else:
-                uri = unquote (rpath)
-
-
-        # --------------------------------------------------
-        # handler selection and dispatch
-        # --------------------------------------------------
-        r = http_server.http_request (self, body, command, uri, version, header)
-
-        print "Aqui", self.handlers
-        for h in self.handlers:
-            print "handler", h
-            if h.match (r):
-                print "Matched!"
-                try:
-                    self.current_request = r
-#                    print dir(r)
-                    # This isn't used anywhere.
-                    # r.handler = h # CYCLE
-                    h.handle_request (r)
-                    h.continue_request(body.split('\t')[-1], r)
-                    
-                except:
-                    #self.server.exceptions.increment()
-                    (file, fun, line), t, v, tbinfo = asyncore.compact_traceback()
-                    print (file, fun, line), t, v, tbinfo
-                    try:
-                        r.error (500)
-                    except:
-                        pass
-                return
-
-
-    def install_handler (self, handler, back=0):
-        if back:
-            self.handlers.append (handler)
-        else:
-            self.handlers.insert(0, handler)
-    def remove_handler (self, handler):
-        self.handlers.remove (handler)
-
-    def set_terminator(self, thing):
-        print "thing:", thing
 
 
 def make_amqp_servers(options, supervisord):
