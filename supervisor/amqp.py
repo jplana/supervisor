@@ -508,12 +508,16 @@ class supervisor_amqp_server(AsyncoreConnection):
             props = self.props
         msg = producer.more()
         print "pushing more", msg
-        if type(msg) == type(''):
-            self.channel.basic_publish(exchange='',
-                        routing_key=props.reply_to,
-                        properties=pika.BasicProperties(correlation_id = \
-                        props.correlation_id),
-                        body=msg)
+
+        if not type(msg) == type(''):
+            print "Not done yet"
+            return NOT_DONE_YET
+        
+        self.channel.basic_publish(exchange='',
+                    routing_key=props.reply_to,
+                    properties=pika.BasicProperties(correlation_id = \
+                    props.correlation_id),
+                    body=msg)
         
     def log (self, bytes):
         pass
