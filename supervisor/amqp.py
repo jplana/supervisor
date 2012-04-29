@@ -27,6 +27,7 @@ from supervisor.medusa import logger
 from pika.adapters import AsyncoreConnection #, AsyncoreDispatcher
 from pika.connection import ConnectionParameters
 from pika.credentials import PlainCredentials
+from supervisor.http import logtail_handler, mainlogtail_handler
 
 from urllib import unquote, splitquery
 from supervisor.medusa.auth_handler import auth_handler
@@ -503,6 +504,7 @@ class supervisor_amqp_server(AsyncoreConnection):
                     properties=pika.BasicProperties(correlation_id = \
                     props.correlation_id),
                     body=msg)
+        self.log_info("Response: %s" % msg)
         
     def log (self, bytes):
         pass
@@ -598,13 +600,13 @@ def make_amqp_servers(options, supervisord):
         subinterfaces.append(('system',
                                SystemNamespaceRPCInterface(subinterfaces)))
         xmlrpchandler = supervisor_xmlrpc_handler(supervisord, subinterfaces)
-        # tailhandler = logtail_handler(supervisord)
-        # maintailhandler = mainlogtail_handler(supervisord)
-        # uihandler = supervisor_ui_handler(supervisord)
-        # here = os.path.abspath(os.path.dirname(__file__))
-        # templatedir = os.path.join(here, 'ui')
-        # filesystem = filesys.os_filesystem(templatedir)
-        # defaulthandler = default_handler.default_handler(filesystem)
+        tailhandler = logtail_handler(supervisord)
+        maintailhandler = mainlogtail_handler(supervisord)
+        #uihandler = supervisor_ui_handler(supervisord)
+        here = os.path.abspath(os.path.dirname(__file__))
+        templatedir = os.path.join(here, 'ui')
+        filesystem = filesys.os_filesystem(templatedir)
+        defaulthandler = default_handler.default_handler(filesystem)
 
         # username = config['username']
         # password = config['password']
@@ -624,10 +626,10 @@ def make_amqp_servers(options, supervisord):
         #         'authentication checking' % config['section'])
         # # defaulthandler must be consulted last as its match method matches
         # # everything, so it's first here (indicating last checked)
-        # hs.install_handler(defaulthandler)
-        # hs.install_handler(uihandler)
-        # hs.install_handler(maintailhandler)
-        # hs.install_handler(tailhandler)
+        ampq_connection.install_handler(defaulthandler)
+        #ampq_connection.install_handler(uihandler)
+        ampq_connection.install_handler(maintailhandler)
+        ampq_connection.install_handler(tailhandler)
         ampq_connection.install_handler(xmlrpchandler) # last for speed (first checked)
         brokers.append((config, ampq_connection.ioloop))
 
